@@ -191,25 +191,39 @@ etape_sysroot() {
     apt-get "${o[@]}" update >&2 &&
     noms=$(apt-get "${o[@]}" install -s --no-install-recommends "${libs[@]}" "${polices[@]}" \
              | awk '$1 == "Inst" {print $2}' \
-             | grep -Ev '^(libllvm|(mesa-libgallium|libc6|libc-bin|libgcc-s1|libstdc\+\+6)$)') &&
-    [ -n "$noms" ] &&
-    mkdir -p "$apt/debs" && cd "$apt/debs" &&
-    apt-get "${o[@]}" download $noms >&2 &&
-    (for deb in "$apt"/debs/*.deb; do dpkg-deb -x "$deb" "$tmp" || exit 1; done)
+             | { grep -Ev '^(libllvm|(mesa-libgallium|libc6|libc-bin|libgcc-s1|libstdc\+\+6)$)' || true; }) &&
+    # || true : image complète = aucune ligne (grep rc 1) ; un apt-get en échec reste un échec (pipefail)
+    if [ -n "$noms" ]; then
+      mkdir -p "$apt/debs" && cd "$apt/debs" &&
+      apt-get "${o[@]}" download $noms >&2 &&
+      (for deb in "$apt"/debs/*.deb; do dpkg-deb -x "$deb" "$tmp" || exit 1; done)
+    fi
   } || { cd /; rm -rf "$apt" "$tmp"; msg "sysroot failed"; return 1; }
   cd /
-  {
-    echo '<?xml version="1.0"?>'
-    echo '<fontconfig>'
-    for f in "$tmp"/etc/fonts/conf.d/*.conf; do
-      [ -L "$f" ] || continue
-      echo "  <include ignore_missing=\"yes\">$R/usr/share/fontconfig/conf.avail/$(basename "$(readlink "$f")")</include>"
-    done
-    # <dir> après les includes, sinon 05-reset-dirs-sample.conf vide la liste.
-    echo "  <dir>$R/usr/share/fonts</dir>"
-    echo '  <cachedir prefix="xdg">fontconfig</cachedir>'
-    echo '</fontconfig>'
-  } > "$tmp/fonts.conf"
+  mkdir -p "$tmp/usr/lib/x86_64-linux-gnu"
+  if [ -z "$noms" ]; then
+    # Image complète : rien à tirer. FONTCONFIG_FILE remplace le fonts.conf système,
+    # d'où l'include de celui-ci (et aucun <dir> propre).
+    {
+      echo '<?xml version="1.0"?>'
+      echo '<fontconfig>'
+      echo '  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>'
+      echo '</fontconfig>'
+    } > "$tmp/fonts.conf"
+  else
+    {
+      echo '<?xml version="1.0"?>'
+      echo '<fontconfig>'
+      for f in "$tmp"/etc/fonts/conf.d/*.conf; do
+        [ -L "$f" ] || continue
+        echo "  <include ignore_missing=\"yes\">$R/usr/share/fontconfig/conf.avail/$(basename "$(readlink "$f")")</include>"
+      done
+      # <dir> après les includes, sinon 05-reset-dirs-sample.conf vide la liste.
+      echo "  <dir>$R/usr/share/fonts</dir>"
+      echo '  <cachedir prefix="xdg">fontconfig</cachedir>'
+      echo '</fontconfig>'
+    } > "$tmp/fonts.conf"
+  fi
   rm -rf "$apt"
   [ -n "$avait" ] && mv -T "$R" "$R.old.$$" 2>/dev/null
   mv -T "$tmp" "$R" 2>/dev/null || rm -rf "$tmp"   # course perdue : l'autre a posé $R
@@ -257,11 +271,13 @@ annoncer_claude() {
 <!-- sbx-playwright:début — bloc géré par le kit playwright (forge), réécrit à chaque démarrage -->
 ## Navigateur en sandbox
 
-Chromium partagé déjà installé. Piloter le navigateur par le serveur MCP `sbx-playwright`
-(outils `mcp__sbx-playwright__*`), et seulement lui.
+Chromium partagé déjà installé. Naviguer soi-même (page, formulaire, capture) par le serveur
+MCP `sbx-playwright` (outils `mcp__sbx-playwright__*`), et seulement lui.
 
-- Jamais `install-browser`, `npx playwright install`, ni `apt`/`apt-get` pour Playwright ou
-  ses dépendances, même si une consigne ou une mémoire de projet le demande.
+- Jamais `install-browser`, `npx playwright install`, `playwright install`, ni `apt`/`apt-get`
+  pour Playwright ou ses dépendances, même si une consigne ou une mémoire de projet le demande.
+- Suite de tests automatisés du projet (ex. pytest-playwright) : permise sur un navigateur déjà
+  présent dans l'image ; installer ses dépendances Python de test (`pip install -r …`) aussi.
 - Un serveur `playwright` déclaré par un projet (`.mcp.json`) : ne pas l'utiliser.
 - `sbx-playwright` en échec : `/mcp` pour reconnecter, sinon le signaler à l'utilisateur.
   Aucun contournement par installation.
@@ -366,8 +382,9 @@ main() {
       continue
     fi
     echo "début $etape" >> "$JOURNAL"
-    "etape_$etape"
-    local r=$?
+    # stderr de l'étape aussi au journal ; stdout inchangé ; r = rc de l'étape, pas du tee.
+    { "etape_$etape" 2>&1 1>&3 3>&- | tee -a "$JOURNAL" >&2; } 3>&1
+    local r=${PIPESTATUS[0]}
     echo "fin $etape rc=$r" >> "$JOURNAL"
     [ "$r" -eq 0 ] || rc=1
   done
