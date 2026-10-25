@@ -3,7 +3,7 @@ set -u
 
 # Surcharges utiles aux tests seulement (en production : défauts).
 CLOUD_LIB=${CLOUD_LIB:-/usr/local/lib}
-CLOUD_ETAPES=${CLOUD_ETAPES:-"garde plugins playwright"}
+CLOUD_ETAPES=${CLOUD_ETAPES:-"garde plugins playwright docker"}
 JOURNAL=${CLOUD_JOURNAL:-/tmp/claude-cloud-setup.log}   # CLOUD_JOURNAL : utile aux tests seulement
 
 # poser FICHIER MODE : stdin -> $CLOUD_LIB/FICHIER ; réécrit seulement si le contenu change.
@@ -21,6 +21,7 @@ prerequis() {
   local outil manquants=()
   for outil in jq git claude; do manquants+=("$outil"); done
   case " $CLOUD_ETAPES " in *" playwright "*) manquants+=(node npm) ;; esac
+  case " $CLOUD_ETAPES " in *" docker "*) manquants+=(docker dockerd) ;; esac
   local rc=0
   for outil in "${manquants[@]}"; do
     command -v "$outil" > /dev/null || { echo "claude-cloud: $outil absent du PATH" >&2; echo "$outil absent du PATH" >> "$JOURNAL"; rc=1; }
@@ -320,6 +321,39 @@ enregistrer_claude || rc=1
 exit "$rc"
 CLOUD_PLAYWRIGHT_ENSURE
   bash "$CLOUD_LIB/playwright-kit/ensure.sh"
+}
+etape_docker() {
+  poser claude-cloud/docker.sh 0755 <<'CLOUD_DOCKER'
+#!/usr/bin/env bash
+# Hook SessionStart : démarre dockerd s'il ne répond pas. Toujours rc 0 : un hook en échec
+# ne doit pas gêner la session.
+# CLOUD_DOCKER_ATTENTE (secondes) et CLOUD_DOCKER_LOG : utiles aux tests seulement.
+LOG=${CLOUD_DOCKER_LOG:-/tmp/dockerd.log}
+if docker info > /dev/null 2>&1; then exit 0; fi
+# Détaché du groupe du hook (setsid) : Claude Code peut tuer le groupe à la fin du hook.
+if command -v setsid > /dev/null; then
+  setsid nohup dockerd > "$LOG" 2>&1 < /dev/null &
+else
+  nohup dockerd > "$LOG" 2>&1 < /dev/null &
+fi
+for _ in $(seq "${CLOUD_DOCKER_ATTENTE:-15}"); do
+  docker info > /dev/null 2>&1 && exit 0
+  sleep 1
+done
+echo "claude-cloud: docker indisponible, voir $LOG" >&2
+exit 0
+CLOUD_DOCKER
+  local f=$HOME/.claude/settings.json tmp
+  mkdir -p "${f%/*}"
+  [ -s "$f" ] || echo '{}' > "$f"
+  tmp=$(mktemp) || return 1
+  jq --arg c /usr/local/lib/claude-cloud/docker.sh '
+    .hooks.SessionStart //= []
+    | if any(.hooks.SessionStart[]?.hooks[]?; .command == $c) then .
+      else .hooks.SessionStart += [{matcher: "startup|resume", hooks: [{type: "command", command: $c}]}] end' "$f" > "$tmp" \
+    || { echo "claude-cloud: settings.json illisible, hook docker non posé" >&2; rm -f "$tmp"; return 1; }
+  cmp -s "$f" "$tmp" || cat "$tmp" > "$f"
+  rm -f "$tmp"
 }
 main() {
   local etape rc=0
