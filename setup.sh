@@ -78,23 +78,32 @@ installed="$HOME/.claude/plugins/installed_plugins.json"
 claude_bin="$(command -v claude || true)"
 [ -n "$claude_bin" ] || claude_bin="$HOME/.local/bin/claude"
 echec=0
-# "<plugin>@<marketplace> <source de la marketplace>" — la seule liste.
+settings="$HOME/.claude/settings.json"
+# "<plugin>@<marketplace> <source de la marketplace> <actif|inactif>" — la seule liste.
+# inactif : installé mais désactivé ; à activer à la demande (claude plugin enable <plugin>).
 plugins=(
-  "caveman@caveman JuliusBrussee/caveman"
-  "superpowers@claude-plugins-official anthropics/claude-plugins-official"
-  "claude-security@claude-plugins-official anthropics/claude-plugins-official"
+  "superpowers@claude-plugins-official anthropics/claude-plugins-official actif"
+  "claude-security@claude-plugins-official anthropics/claude-plugins-official inactif"
 )
+# Retirés de la liste : désinstallés s'ils sont encore là.
+retires=(caveman@caveman)
+if [ ! -x "$claude_bin" ]; then
+  echo "claude-plugins kit: claude CLI not found, skipping" >&2
+  exit 0
+fi
+present() { [ -f "$installed" ] && jq -e --arg k "$1" '.plugins[$k]' "$installed" >/dev/null 2>&1; }
 for entree in "${plugins[@]}"; do
-  cle=${entree%% *} source=${entree#* }
-  if [ -f "$installed" ] && jq -e --arg k "$cle" '.plugins[$k]' "$installed" >/dev/null 2>&1; then
-    continue
+  read -r cle source etat <<<"$entree"
+  if ! present "$cle"; then
+    "$claude_bin" plugin marketplace add "$source" || true
+    "$claude_bin" plugin install "$cle" || { echec=1; continue; }
   fi
-  if [ ! -x "$claude_bin" ]; then
-    echo "claude-plugins kit: claude CLI not found, skipping" >&2
-    exit 0
+  if [ "$etat" = inactif ] && jq -e --arg k "$cle" '.enabledPlugins[$k] == true' "$settings" >/dev/null 2>&1; then
+    "$claude_bin" plugin disable "$cle" || echec=1
   fi
-  "$claude_bin" plugin marketplace add "$source" || true
-  "$claude_bin" plugin install "$cle" || echec=1
+done
+for cle in "${retires[@]}"; do
+  if present "$cle"; then "$claude_bin" plugin uninstall "$cle" || echec=1; fi
 done
 exit "$echec"
 CLOUD_PLUGINS_ENSURE
